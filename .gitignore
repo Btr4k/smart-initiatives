@@ -1,0 +1,19 @@
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Database files
+*.db
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+
+# OS specific
+.DS_Store
