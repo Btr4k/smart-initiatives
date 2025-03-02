@@ -5,6 +5,8 @@ import json
 import requests
 import datetime
 import os
+import io
+from PyPDF2 import PdfReader
 from pathlib import Path
 
 # Page configuration
@@ -44,6 +46,18 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         content TEXT NOT NULL,
         category TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # Create a table for document analysis history
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS document_analysis (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT NOT NULL,
+        analysis_type TEXT NOT NULL,
+        analysis_result TEXT NOT NULL,
+        employee_id TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
@@ -161,6 +175,32 @@ def save_initiative(initiative_data, ai_feedback):
     conn.commit()
     return cursor.lastrowid
 
+# Save document analysis to database
+def save_document_analysis(file_name, analysis_type, analysis_result, employee_id=None):
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO document_analysis 
+           (file_name, analysis_type, analysis_result, employee_id) 
+           VALUES (?, ?, ?, ?)""",
+        (file_name, analysis_type, analysis_result, employee_id)
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+# Get document analysis history
+def get_document_analysis_history(employee_id=None):
+    if employee_id:
+        return pd.read_sql_query(
+            "SELECT * FROM document_analysis WHERE employee_id = ? ORDER BY created_at DESC",
+            conn,
+            params=(employee_id,)
+        )
+    else:
+        return pd.read_sql_query(
+            "SELECT * FROM document_analysis ORDER BY created_at DESC",
+            conn
+        )
+
 # Get all initiatives
 def get_all_initiatives():
     return pd.read_sql_query("SELECT * FROM initiatives ORDER BY created_at DESC", conn)
@@ -216,16 +256,27 @@ def navigation():
         if role == "موظف":
             page = st.radio(
                 "الصفحات:",
-                ["تقديم مبادرة جديدة", "عرض مبادراتي"]
+                ["تقديم مبادرة جديدة", "عرض مبادراتي", "تحليل المستندات"]
             )
             if page == "تقديم مبادرة جديدة":
                 return "submit_initiative", role
+            elif page == "تحليل المستندات":
+                return "analyze_documents", role
             else:
                 return "view_my_initiatives", role
         
         # Navigation for admin/HR/Finance
         else:
-            return "review_initiatives", role
+            additional_pages = ["مراجعة المبادرات"]
+            if role == "مدير":
+                additional_pages.append("تقارير تحليل المستندات")
+                
+            page = st.radio("الصفحات:", additional_pages)
+            
+            if page == "تقارير تحليل المستندات":
+                return "document_analysis_reports", role
+            else:
+                return "review_initiatives", role
 
 # UI for submitting a new initiative
 def submit_initiative_page():
@@ -329,6 +380,166 @@ def view_my_initiatives_page(employee_id=""):
                 st.markdown("---")
                 st.subheader("ملاحظات الإدارة")
                 st.write(initiative['admin_feedback'])
+
+# UI for analyzing PDF documents
+def analyze_documents_page():
+    st.title("📄 تحليل المستندات")
+    
+    employee_id = st.text_input("الرقم الوظيفي (اختياري)")
+    
+    # File uploader
+    uploaded_file = st.file_uploader("قم برفع ملف PDF للتحليل", type=["pdf"])
+    
+    if uploaded_file is not None:
+        # Read PDF content
+        with st.spinner("جاري معالجة الملف..."):
+            try:
+                pdf_reader = PdfReader(uploaded_file)
+                text = ""
+                for page in pdf_reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+                
+                # Show preview of extracted text
+                with st.expander("معاينة النص المستخرج"):
+                    st.text_area("النص المستخرج", text[:5000] + ("..." if len(text) > 5000 else ""), height=200)
+                
+                # Analysis options
+                analysis_type = st.selectbox(
+                    "اختر نوع التحليل",
+                    ["تلخيص المستند", "تحسين المحتوى", "استخراج النقاط الرئيسية", 
+                     "تحليل نقاط القوة والضعف", "تحويل إلى خطة عمل", "اقتراح تحسينات"]
+                )
+                
+                custom_instructions = st.text_area(
+                    "تعليمات إضافية (اختياري)",
+                    placeholder="أضف أي تعليمات خاصة للذكاء الاصطناعي لتحليل المستند"
+                )
+                
+                if st.button("تحليل المستند"):
+                    with st.spinner("جاري التحليل بواسطة الذكاء الاصطناعي..."):
+                        # Prepare prompt based on analysis type
+                        if analysis_type == "تلخيص المستند":
+                            prompt = f"""
+                            قم بتلخيص المستند التالي بشكل دقيق مع الحفاظ على أهم المعلومات والأفكار الرئيسية.
+                            
+                            المستند:
+                            {text[:15000]}  # Limiting text to avoid too large prompts
+                            
+                            تعليمات إضافية: {custom_instructions}
+                            
+                            قدم ملخصاً شاملاً ومنظماً باللغة العربية.
+                            """
+                        elif analysis_type == "تحسين المحتوى":
+                            prompt = f"""
+                            قم بتحسين صياغة وتنظيم المحتوى التالي مع الحفاظ على المعنى الأصلي.
+                            
+                            المحتوى:
+                            {text[:15000]}
+                            
+                            تعليمات إضافية: {custom_instructions}
+                            
+                            قدم النسخة المحسنة مع التركيز على الوضوح والتنظيم الجيد للأفكار.
+                            """
+                        elif analysis_type == "استخراج النقاط الرئيسية":
+                            prompt = f"""
+                            استخرج النقاط والمعلومات الرئيسية من المستند التالي.
+                            
+                            المستند:
+                            {text[:15000]}
+                            
+                            تعليمات إضافية: {custom_instructions}
+                            
+                            قدم قائمة منظمة بالنقاط الرئيسية والمعلومات المهمة.
+                            """
+                        elif analysis_type == "تحليل نقاط القوة والضعف":
+                            prompt = f"""
+                            قم بتحليل نقاط القوة والضعف في المستند أو المشروع المذكور في النص التالي.
+                            
+                            المستند:
+                            {text[:15000]}
+                            
+                            تعليمات إضافية: {custom_instructions}
+                            
+                            قدم تحليلاً منظماً يتضمن:
+                            1. نقاط القوة الرئيسية
+                            2. نقاط الضعف أو المجالات التي تحتاج إلى تحسين
+                            3. الفرص المحتملة
+                            4. التحديات المتوقعة
+                            """
+                        elif analysis_type == "تحويل إلى خطة عمل":
+                            prompt = f"""
+                            قم بتحويل المحتوى التالي إلى خطة عمل تنفيذية منظمة.
+                            
+                            المحتوى:
+                            {text[:15000]}
+                            
+                            تعليمات إضافية: {custom_instructions}
+                            
+                            قدم خطة عمل تتضمن:
+                            1. الأهداف الرئيسية
+                            2. الخطوات التنفيذية
+                            3. الجدول الزمني المقترح
+                            4. الموارد المطلوبة
+                            5. مؤشرات قياس النجاح
+                            """
+                        elif analysis_type == "اقتراح تحسينات":
+                            prompt = f"""
+                            قم بتحليل المستند التالي واقتراح تحسينات وأفكار لتطويره.
+                            
+                            المستند:
+                            {text[:15000]}
+                            
+                            تعليمات إضافية: {custom_instructions}
+                            
+                            قدم اقتراحات محددة لتحسين:
+                            1. المحتوى والأفكار
+                            2. التنظيم والهيكل
+                            3. الصياغة واللغة
+                            4. الفعالية العامة للمستند
+                            """
+                        
+                        # Call Deepseek API
+                        analysis_result = call_deepseek_api(prompt, st.session_state.api_key)
+                        
+                        # Save analysis to database if employee_id is provided
+                        if employee_id:
+                            save_document_analysis(
+                                uploaded_file.name,
+                                analysis_type,
+                                analysis_result,
+                                employee_id
+                            )
+                        
+                        # Display results
+                        st.subheader("نتائج التحليل")
+                        st.markdown(analysis_result)
+                        
+                        # Option to download results
+                        download_placeholder = st.empty()
+                        buffer = io.BytesIO()
+                        buffer.write(analysis_result.encode())
+                        buffer.seek(0)
+                        
+                        download_placeholder.download_button(
+                            label="تنزيل نتائج التحليل",
+                            data=buffer,
+                            file_name=f"تحليل_{analysis_type}_{uploaded_file.name}.txt",
+                            mime="text/plain"
+                        )
+            
+            except Exception as e:
+                st.error(f"حدث خطأ أثناء معالجة الملف: {str(e)}")
+    
+    # Show previous analyses if employee_id is provided
+    if employee_id:
+        history = get_document_analysis_history(employee_id)
+        if not history.empty:
+            st.subheader("سجل التحليلات السابقة")
+            for _, analysis in history.iterrows():
+                with st.expander(f"{analysis['file_name']} - {analysis['analysis_type']} - {analysis['created_at']}"):
+                    st.markdown(analysis['analysis_result'])
 
 # UI for reviewing initiatives (admin/HR/Finance)
 def review_initiatives_page(role):
@@ -449,6 +660,53 @@ def review_initiatives_page(role):
                     st.success("تم إضافة التقييم المالي")
                     st.experimental_rerun()
 
+# UI for document analysis reports (for managers)
+def document_analysis_reports_page():
+    st.title("📊 تقارير تحليل المستندات")
+    
+    # Get all document analyses
+    analyses = get_document_analysis_history()
+    
+    if analyses.empty:
+        st.info("لا توجد تحليلات مستندات مسجلة.")
+        return
+    
+    # Filter options
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        employee_filter = st.text_input("تصفية حسب الرقم الوظيفي")
+    
+    with col2:
+        analysis_type_filter = st.selectbox(
+            "تصفية حسب نوع التحليل",
+            ["الكل", "تلخيص المستند", "تحسين المحتوى", "استخراج النقاط الرئيسية", 
+             "تحليل نقاط القوة والضعف", "تحويل إلى خطة عمل", "اقتراح تحسينات"]
+        )
+    
+    # Apply filters
+    filtered_analyses = analyses
+    
+    if employee_filter:
+        filtered_analyses = filtered_analyses[filtered_analyses['employee_id'] == employee_filter]
+    
+    if analysis_type_filter != "الكل":
+        filtered_analyses = filtered_analyses[filtered_analyses['analysis_type'] == analysis_type_filter]
+    
+    if filtered_analyses.empty:
+        st.info("لا توجد تحليلات مستندات تطابق معايير التصفية.")
+        return
+    
+    # Display analyses
+    for _, analysis in filtered_analyses.iterrows():
+        with st.expander(f"{analysis['file_name']} - {analysis['analysis_type']} - {analysis['created_at']}"):
+            st.write(f"**الموظف:** {analysis['employee_id'] if analysis['employee_id'] else 'غير محدد'}")
+            st.write(f"**نوع التحليل:** {analysis['analysis_type']}")
+            st.write(f"**تاريخ التحليل:** {analysis['created_at']}")
+            st.markdown("---")
+            st.subheader("نتائج التحليل")
+            st.markdown(analysis['analysis_result'])
+
 # Dashboard for statistics
 def dashboard_page():
     st.title("📊 لوحة المعلومات")
@@ -549,6 +807,12 @@ def main():
     
     elif page == "review_initiatives":
         review_initiatives_page(role)
+    
+    elif page == "analyze_documents":
+        analyze_documents_page()
+    
+    elif page == "document_analysis_reports":
+        document_analysis_reports_page()
     
     elif page == "dashboard":
         dashboard_page()
